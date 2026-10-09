@@ -1,0 +1,1138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Clawd Run · 螃蟹快跑</title>
+<style>
+  :root{
+    --cream:#F0EEE6;
+    --ink:#2B2118;
+    --orange:#D97757;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%}
+  body{
+    margin:0;
+    background:var(--cream);
+    color:var(--ink);
+    font-family:"Courier New",ui-monospace,SFMono-Regular,Menlo,monospace;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    gap:14px;
+    padding:16px;
+    overflow:hidden;
+    touch-action:none;
+    user-select:none;
+    transition:background .6s ease,color .6s ease;
+  }
+  body.night{
+    --cream:#1C1B19;
+    --ink:#E8E4DA;
+  }
+  h1{
+    margin:0;
+    font-size:15px;
+    letter-spacing:.32em;
+    text-transform:uppercase;
+    font-weight:700;
+    opacity:.55;
+  }
+  h1 .crab{color:var(--orange);letter-spacing:0}
+  #stage{
+    position:relative;
+    width:100%;
+    max-width:1000px;
+    line-height:0;
+    filter:drop-shadow(0 10px 26px rgba(0,0,0,.07));
+  }
+  canvas{
+    display:block;
+    width:100%;
+    border-radius:14px;
+    background:var(--cream);
+    transition:background .6s ease;
+    touch-action:none;
+  }
+  /* ── 屏幕按键:沿用 Clawd 的造型语言 —— 纯色、直角、无渐变、硬阴影 ── */
+  #pad{
+    display:flex;
+    gap:12px;
+    justify-content:center;
+    align-items:stretch;
+  }
+  .pbtn{
+    appearance:none;
+    -webkit-appearance:none;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    gap:5px;
+    min-width:76px;
+    padding:9px 16px 7px;
+    font-family:inherit;
+    font-size:13px;
+    font-weight:700;
+    letter-spacing:.2em;
+    text-indent:.2em;                 /* 抵消末尾字距,让字视觉居中 */
+    line-height:1;
+    color:#000;                       /* 与 Clawd 的眼睛同色;顺带把对比度从 3.2:1 提到 11.8:1 */
+    background:#d97757;
+    border:3px solid var(--ink);
+    border-radius:0;
+    box-shadow:5px 5px 0 0 var(--ink);
+    cursor:pointer;
+    touch-action:none;
+    user-select:none;
+    -webkit-user-select:none;
+    outline:none;
+  }
+  .pbtn .pi{display:block;line-height:0}
+  .pbtn .pi svg{display:block}
+  /* 按下 = 整块压进阴影里 */
+  .pbtn:active,
+  .pbtn.on{
+    transform:translate(5px,5px);
+    box-shadow:0 0 0 0 var(--ink);
+  }
+  /* 已激活(停住中):反色,一眼看出状态 */
+  .pbtn.on{
+    background:var(--ink);
+    color:var(--cream);
+  }
+  #hint{
+    font-size:12px;
+    letter-spacing:.06em;
+    opacity:.42;
+    text-align:center;
+    line-height:1.9;
+    max-width:640px;
+  }
+  kbd{
+    font-family:inherit;
+    font-size:11px;
+    border:1px solid currentColor;
+    border-radius:4px;
+    padding:1px 5px;
+    opacity:.8;
+  }
+  @media (max-width:520px){
+    h1{font-size:12px;letter-spacing:.2em}
+    #hint{font-size:11px}
+    #pad{gap:8px}
+    .pbtn{min-width:62px;padding:8px 10px 6px;font-size:12px;box-shadow:4px 4px 0 0 var(--ink)}
+    .pbtn:active,.pbtn.on{transform:translate(4px,4px)}
+    .pbtn .pi svg{width:18px;height:18px}
+  }
+</style>
+</head>
+<body>
+
+<h1>Clawd <span class="crab">✳</span> Run</h1>
+
+<div id="stage"><canvas id="game"></canvas></div>
+
+<div id="pad">
+  <button class="pbtn" id="bStop" type="button" tabindex="-1"><span class="pi"></span><span class="pl">暂停</span></button>
+</div>
+
+<div id="hint">
+  <kbd>空格</kbd> / <kbd>↑</kbd> 跳跃 &nbsp;·&nbsp; <kbd>↓</kbd> 下蹲 &nbsp;·&nbsp; <kbd>Shift</kbd> 或下方按钮 暂停/继续 &nbsp;·&nbsp; <kbd>M</kbd> 声音<br>
+  暂停后世界冻结,可以慢慢看螃蟹,照样能蹲能跳 &nbsp;·&nbsp; 手机:上半屏跳,按住下半屏蹲
+</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ══════════════════════════════════════════════════════════
+   世界坐标(逻辑分辨率,渲染时整体缩放适配屏幕)
+   ══════════════════════════════════════════════════════════ */
+const W = 800;
+const H = 220;
+const GROUND_Y = 172;          // 地面线
+
+// 约定位:crab.y = 离地高度(≥0,越大越高);crab.vy 向上为正
+const GRAVITY     = 2560;      // px/s²,方向向下
+const JUMP_V      = 640;       // 起跳初速度,向上为正
+const JUMP_CUT    = 460;       // 松手后残留的上抛速度上限 → 短按=小跳
+                               // 峰值 ≈ v²/2g:460 → 38px(过得了小仙人掌 34),640 → 75px(过大仙人掌 50)
+const FAST_FALL   = 1900;      // 空中下蹲时的额外下坠加速度
+
+const SPEED_MIN   = 340;
+const SPEED_MAX   = 800;
+const SPEED_RAMP  = 0.0000022; // 每分速的加速系数
+
+const CRAB_X      = 96;        // 螃蟹固定的 x 位置
+const PIX         = 5;         // 1 个精灵像素 = 5 逻辑单位 → Clawd 为 60×40
+const SPR_W       = 12;        // 官方原生网格宽
+const SPR_H       = 8;         // 官方原生网格高
+const CRAB_W      = 36;        // 碰撞盒比图形窄,手感更宽容
+const CRAB_H      = 38;        // 站立碰撞盒高
+const CRAB_DUCK_W = 36;
+const CRAB_DUCK_H = 19;        // 下蹲:图形高度只剩一半
+
+const NIGHT_EVERY = 700;       // 每多少分切换昼夜
+const MILESTONE   = 100;       // 每多少分「叮」一声
+
+/* ══════════════════════════════════════════════════════════
+   DOM / Canvas
+   ══════════════════════════════════════════════════════════ */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+function fitCanvas(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+  const avail = canvas.parentElement.getBoundingClientRect().width || W;
+  const cssW = Math.max(280, Math.min(avail, 1000));
+  const cssH = cssW * (H / W);
+  canvas.width  = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+  canvas.style.height = cssH + 'px';
+  const k = (cssW * dpr) / W;
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+}
+window.addEventListener('resize', fitCanvas);
+
+const roundRect = (g,x,y,w,h,r) => {
+  r = Math.max(0, Math.min(r, Math.abs(w)/2, Math.abs(h)/2));
+  g.beginPath();
+  g.moveTo(x+r,y);
+  g.arcTo(x+w,y,x+w,y+h,r);
+  g.arcTo(x+w,y+h,x,y+h,r);
+  g.arcTo(x,y+h,x,y,r);
+  g.arcTo(x,y,x+w,y,r);
+  g.closePath();
+};
+
+/* ══════════════════════════════════════════════════════════
+   音效(WebAudio 合成,不需要任何音频文件)
+   ══════════════════════════════════════════════════════════ */
+let actx = null;
+let soundOn = true;
+
+function audio(){
+  if (!actx){
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    actx = new AC();
+  }
+  if (actx.state === 'suspended') actx.resume();
+  return actx;
+}
+
+function tone(freq, dur, type='square', vol=0.045, slideTo=null){
+  if (!soundOn) return;
+  const a = audio(); if (!a) return;
+  const t = a.currentTime;
+  const osc = a.createOscillator();
+  const gain = a.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, t);
+  if (slideTo) osc.frequency.exponentialRampToValueAtTime(Math.max(30, slideTo), t + dur);
+  gain.gain.setValueAtTime(vol, t);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  osc.connect(gain); gain.connect(a.destination);
+  osc.start(t); osc.stop(t + dur + 0.02);
+}
+
+const sfx = {
+  jump:  () => tone(480, 0.11, 'square', 0.040, 780),
+  land:  () => tone(150, 0.06, 'sine',   0.030),
+  point: () => { tone(1046, 0.07, 'square', 0.032); setTimeout(()=>tone(1568,0.09,'square',0.032), 70); },
+  die:   () => { tone(400, 0.5, 'sawtooth', 0.055, 70); setTimeout(()=>tone(200,0.4,'square',0.04,50), 90); },
+};
+
+/* ══════════════════════════════════════════════════════════
+   调色板
+   ══════════════════════════════════════════════════════════ */
+const ORANGE      = '#D97757';   // 只留给白天天空里的星芒(太阳)用
+
+function palette(night){
+  return night
+    ? { bg:'#1C1B19', fg:'#E8E4DA', faint:'#4A463F', cactus:'#7E8C74', cactusDark:'#5C6A54', bird:'#C8C2B4' }
+    : { bg:'#F0EEE6', fg:'#2B2118', faint:'#C9C3B4', cactus:'#5D7A5A', cactusDark:'#435B41', bird:'#6B6459' };
+}
+
+/* ══════════════════════════════════════════════════════════
+   Clawd —— 逐像素还原自官方 12×8 网格
+   素材:companion-inc/pet-clawd → art/clawd-official/
+   全图只有一个颜色 #d97757;眼睛是纯黑方块,没有眼白、没有描边、没有曲线
+   ══════════════════════════════════════════════════════════ */
+const CLAWD_ORANGE = '#d97757';
+const CLAWD_INK    = '#000000';
+
+// 上半身固定:身体 8 格宽(第 2..9 列),钳子在 row2-3 横伸满 12 格,
+// 眼睛是 row1 的第 3、8 列
+const CLAWD_TOP = [
+  '··########··',
+  '··#@####@#··',
+  '############',
+  '############',
+  '··########··',
+  '··########··',
+];
+
+// 4 相位腿部循环,取自官方 20 帧走路动画的归一化结果
+const CLAWD_LEGS = [
+  ['··#·#··#·#··', '··#·#··#·#··'],   // 四腿着地
+  ['·#··#··#·#··', '·#··#··#·#··'],   // 前腿前摆
+  ['··#·#··#·#··', '··#····#····'],   // 后腿抬起
+  ['·#·#····##··', '·#·#····##··'],   // 收腿
+];
+
+const CLAWD_RUN = CLAWD_LEGS.map(legs => CLAWD_TOP.concat(legs));
+
+// 腾空:钳子保持平举(官方 jumping 姿势就是这样),四条腿收起
+const CLAWD_JUMP = CLAWD_TOP.concat([
+  '··#·#··#·#··',
+  '············',
+]);
+
+// 下蹲:整体压扁到最下面 4 行(高度只剩一半)
+const CLAWD_DUCK = [
+  '············',
+  '············',
+  '············',
+  '············',
+  '··########··',
+  '··#@####@#··',
+  '############',
+  '··#·#··#·#··',
+];
+
+const CLAWD_DEAD = CLAWD_TOP.concat(['··#·#··#·#··', '··#·#··#·#··']);
+
+/**
+ * 把 12×8 网格画成实心方块。
+ * (x0,y0) 为网格左上角,dp = 一个精灵像素占多少设备像素
+ */
+function paintGrid(g, grid, x0, y0, dp){
+  for (let r = 0; r < SPR_H; r++){
+    const line = grid[r];
+    let c = 0;
+    while (c < SPR_W){
+      const ch = line[c];
+      if (ch === '·' || ch === '.'){ c++; continue; }
+      let c2 = c;                                     // 合并同色连续像素
+      while (c2 + 1 < SPR_W && line[c2 + 1] === ch) c2++;
+      g.fillStyle = ch === '@' ? CLAWD_INK : CLAWD_ORANGE;
+      g.fillRect(x0 + c * dp, y0 + r * dp, (c2 - c + 1) * dp, dp);
+      c = c2 + 1;
+    }
+  }
+}
+
+/**
+ * @param cx     螃蟹中心 x(逻辑坐标)
+ * @param feetY  脚底 y(站在地面时 = GROUND_Y)
+ * @param st     { ducking, onGround, legFrame, dead }
+ */
+function drawClawd(g, cx, feetY, st){
+  const duck = st.ducking && st.onGround;
+  let grid;
+  if (st.dead)           grid = CLAWD_DEAD;
+  else if (duck)         grid = CLAWD_DUCK;
+  else if (!st.onGround) grid = CLAWD_JUMP;
+  else                   grid = CLAWD_RUN[st.legFrame & 3];
+
+  // 切到设备像素空间再画:画布缩放是非整数,直接在逻辑坐标里画会把像素糊掉
+  const t = g.getTransform();
+  const dp = Math.max(2, Math.round(PIX * t.a));
+
+  g.save();
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.translate(t.e, t.f);                    // 保留父级位移(屏震),避免整帧错位
+
+  if (st.dead){
+    // 翻肚皮:上下颠倒 180°,四肢朝天。90° 的整数倍转角在像素空间里依然硬边,
+    // 而且轮廓仍是 12×8,不会比站立时更高
+    g.translate(Math.round(cx * t.a), Math.round(feetY * t.d) - (SPR_H / 2) * dp);
+    g.rotate(Math.PI);
+    paintGrid(g, grid, -(SPR_W / 2) * dp, -(SPR_H / 2) * dp, dp);
+  } else {
+    paintGrid(g, grid,
+      Math.round(cx * t.a) - (SPR_W / 2) * dp,
+      Math.round(feetY * t.d) - SPR_H * dp,
+      dp);
+  }
+
+  g.restore();
+}
+
+/* ══════════════════════════════════════════════════════════
+   障碍物
+   ══════════════════════════════════════════════════════════ */
+function makeCactus(x, big, group){
+  const unitW = big ? 26 : 17;
+  const unitH = big ? 50 : 34;
+  const gap   = big ? 4  : 3;
+  const w = unitW * group + gap * (group - 1);
+  const shapes = [];
+  for (let i = 0; i < group; i++){
+    shapes.push({
+      cx: i * (unitW + gap) + unitW / 2,
+      w : unitW,
+      h : unitH * (group > 1 ? (i === 1 ? 1 : 0.86) : 1),
+      armL: group === 1 ? Math.random() < 0.6 : (i === 0),
+      armR: group === 1 ? Math.random() < 0.6 : (i === group - 1),
+    });
+  }
+  return { kind:'cactus', x, w, h: unitH, shapes, passed:false };
+}
+
+function drawCactus(g, o, pal){
+  g.fillStyle = pal.cactus;
+  for (const s of o.shapes){
+    const top = GROUND_Y - s.h;
+    const tw  = Math.max(7, s.w * 0.42);
+    const r   = tw / 2;
+    const cx  = o.x + s.cx;
+    const armW = tw * 0.72;
+    const armR = armW / 2;
+    const armLen = (s.w - tw) / 2;
+    const armY    = top + s.h * 0.50;   // 横臂高度
+    const armTopY = top + s.h * 0.22;   // 竖臂顶端
+
+    if (s.armL && armLen > 1){
+      roundRect(g, cx - tw/2 - armLen, armY, armLen + tw*0.4, armW, armR); g.fill();
+      roundRect(g, cx - tw/2 - armLen, armTopY, armW, armY - armTopY + armW, armR); g.fill();
+    }
+    if (s.armR && armLen > 1){
+      roundRect(g, cx + tw/2 - tw*0.4, armY + s.h*0.10, armLen + tw*0.4, armW, armR); g.fill();
+      roundRect(g, cx + tw/2 + armLen - armW, armTopY + s.h*0.12, armW, armY - armTopY + armW, armR); g.fill();
+    }
+    roundRect(g, cx - tw/2, top, tw, s.h, r); g.fill();
+  }
+}
+
+const BIRD_W = 40, BIRD_H = 26;
+
+function drawBird(g, o, pal, t){
+  const bx = o.x;
+  const by = o.y + BIRD_H / 2;           // 身体中心
+  const flap = Math.sin(t * 13 + o.seed) * 0.9;
+
+  g.save();
+  g.strokeStyle = pal.bird;
+  g.fillStyle   = pal.bird;
+  g.lineWidth = 3;
+  g.lineCap = 'round';
+  g.lineJoin = 'round';
+
+  // 翅膀(远侧)
+  g.globalAlpha = 0.45;
+  g.beginPath();
+  g.moveTo(bx + 17, by);
+  g.quadraticCurveTo(bx + 8, by - 14 - flap*7, bx - 6, by - 4 - flap*5);
+  g.stroke();
+  g.globalAlpha = 1;
+
+  // 身体
+  g.beginPath();
+  g.ellipse(bx + 19, by, 13, 6.4, -0.10, 0, Math.PI*2);
+  g.fill();
+
+  // 头 + 喙
+  g.beginPath();
+  g.arc(bx + 32, by - 5.5, 5.4, 0, Math.PI*2);
+  g.fill();
+  g.beginPath();
+  g.moveTo(bx + 36, by - 6.5);
+  g.lineTo(bx + 46, by - 4);
+  g.lineTo(bx + 36, by - 2.5);
+  g.closePath();
+  g.fill();
+
+  // 眼
+  g.fillStyle = pal.bg;
+  g.beginPath(); g.arc(bx + 33.4, by - 6.4, 1.6, 0, Math.PI*2); g.fill();
+
+  // 翅膀(近侧)
+  g.fillStyle = pal.bird;
+  g.beginPath();
+  g.moveTo(bx + 17, by - 1);
+  g.quadraticCurveTo(bx + 9, by + 13 + flap*8, bx - 8, by + 3 + flap*6);
+  g.quadraticCurveTo(bx + 6, by + 5, bx + 17, by - 1);
+  g.closePath();
+  g.fill();
+
+  // 尾
+  g.beginPath();
+  g.moveTo(bx + 7, by - 1);
+  g.lineTo(bx - 6, by - 6);
+  g.lineTo(bx - 5, by + 2);
+  g.closePath();
+  g.fill();
+
+  g.restore();
+}
+
+// 三种飞行高度:低空必须下蹲,高空是干扰项
+const BIRD_LEVELS = [34, 62];
+
+/* ══════════════════════════════════════════════════════════
+   场景装饰:云 / 星星 / 地面碎石 / 粒子
+   ══════════════════════════════════════════════════════════ */
+function seedClouds(){
+  const arr = [];
+  for (let i = 0; i < 7; i++){
+    arr.push({
+      x: Math.random() * W * 1.6,
+      y: 24 + Math.random() * 62,
+      s: 0.62 + Math.random() * 0.75,
+      sp: 0.10 + Math.random() * 0.14,
+    });
+  }
+  return arr;
+}
+
+function seedStars(){
+  const arr = [];
+  for (let i = 0; i < 46; i++){
+    arr.push({
+      x: Math.random() * W,
+      y: 10 + Math.random() * 120,
+      r: 0.7 + Math.random() * 1.3,
+      ph: Math.random() * Math.PI * 2,
+    });
+  }
+  return arr;
+}
+
+function seedGround(){
+  const arr = [];
+  for (let i = 0; i < 140; i++){
+    arr.push({
+      x: Math.random() * W * 2,
+      y: GROUND_Y + 5 + Math.random() * 13,
+      w: 1 + Math.random() * 9,
+      h: 1,
+    });
+  }
+  return arr;
+}
+
+function drawCloud(g, c, pal, nightMix){
+  g.save();
+  g.globalAlpha = 0.55 * (1 - nightMix * 0.55);
+  g.fillStyle = pal.faint;
+  g.translate(c.x, c.y);
+  g.scale(c.s, c.s);
+  g.beginPath();
+  g.arc(0, 0, 9, 0, Math.PI*2);
+  g.arc(12, 2, 7, 0, Math.PI*2);
+  g.arc(-13, 3, 6.5, 0, Math.PI*2);
+  g.arc(2, 6, 10, 0, Math.PI*2);
+  g.fill();
+  g.restore();
+}
+
+// Claude 的星芒图标,当作太阳
+function drawSun(g, x, y, r, color, spin){
+  g.save();
+  g.translate(x, y);
+  g.rotate(spin);
+  g.strokeStyle = color;
+  g.lineWidth = 2.6;
+  g.lineCap = 'round';
+  for (let i = 0; i < 8; i++){
+    const a = (i / 8) * Math.PI * 2;
+    const len = r * (i % 2 === 0 ? 1 : 0.72);
+    g.beginPath();
+    g.moveTo(Math.cos(a) * r * 0.34, Math.sin(a) * r * 0.34);
+    g.lineTo(Math.cos(a) * len, Math.sin(a) * len);
+    g.stroke();
+  }
+  g.restore();
+}
+
+/* ══════════════════════════════════════════════════════════
+   游戏状态
+   ══════════════════════════════════════════════════════════ */
+const crab = { y: 0, vy: 0, onGround: true, ducking: false, dead: false };
+
+const S = {
+  phase: 'ready',       // ready | run | paused | over
+  time: 0,
+  speed: SPEED_MIN,
+  score: 0,
+  hi: 0,
+  nextMilestone: MILESTONE,
+  obstacles: [],
+  particles: [],
+  clouds: seedClouds(),
+  stars: seedStars(),
+  ground: seedGround(),
+  spawnIn: 620,
+  runPhase: 0,
+  legFrame: 0,
+  night: false,
+  nightMix: 0,
+  overAt: 0,
+  flash: 0,
+  shake: 0,
+  stopped: false,       // 按住 Shift 停住:世界冻结,但螃蟹仍可蹲可跳
+};
+
+try { S.hi = parseInt(localStorage.getItem('clawdRunHi') || '0', 10) || 0; } catch(e){}
+
+function reset(){
+  crab.y = 0; crab.vy = 0; crab.onGround = true; crab.ducking = false; crab.dead = false;
+  S.phase = 'run';
+  S.time = 0;
+  S.speed = SPEED_MIN;
+  S.score = 0;
+  S.nextMilestone = MILESTONE;
+  S.obstacles.length = 0;
+  S.particles.length = 0;
+  S.spawnIn = 560;
+  S.night = false;
+  S.nightMix = 0;
+  S.flash = 0;
+  S.shake = 0;
+  S.stopped = false;
+}
+
+/* ══════════════════════════════════════════════════════════
+   输入
+   ══════════════════════════════════════════════════════════ */
+function jump(){
+  if (S.phase === 'ready'){ reset(); return; }
+  if (S.phase === 'over'){
+    if (S.time - S.overAt > 0.35) reset();
+    return;
+  }
+  if (S.phase !== 'run') return;
+  if (crab.onGround){
+    crab.vy = JUMP_V;
+    crab.onGround = false;
+    crab.ducking = false;
+    sfx.jump();
+    for (let i = 0; i < 6; i++) puff(CRAB_X - 6, GROUND_Y, -1);
+  }
+}
+
+function endJump(){
+  if (crab.vy > JUMP_CUT) crab.vy = JUMP_CUT;   // 提前松手就削掉上抛速度
+}
+
+function setDuck(on){
+  if (S.phase !== 'run') return;
+  crab.ducking = on;
+  if (on && !crab.onGround) crab.vy -= 420;   // 空中下蹲 → 往下压,快速落地
+}
+
+function setStop(on){
+  // 只有跑动中能停;死亡/暂停/标题界面一律强制解除,免得卡住
+  S.stopped = on && S.phase === 'run';
+}
+
+// 切走标签页会自动进入 paused(避免离屏时被撞死)。删掉 P 键之后必须留一条
+// 出路,否则回来就卡在暂停界面了 —— 任何游戏输入都能恢复
+function resumeIfPaused(){
+  if (S.phase !== 'paused') return false;
+  S.phase = 'run';
+  return true;
+}
+
+function puff(x, y, dir){
+  S.particles.push({
+    x, y,
+    vx: dir * (40 + Math.random() * 130),
+    vy: -30 - Math.random() * 80,
+    life: 0.35 + Math.random() * 0.35,
+    max: 0.7,
+    r: 1.4 + Math.random() * 2.2,
+  });
+}
+
+window.addEventListener('keydown', e => {
+  const k = e.code;
+  if (k === 'Space' || k === 'ArrowUp' || k === 'KeyW' || k === 'Enter'){
+    e.preventDefault();
+    audio();
+    if (resumeIfPaused()) return;
+    if (!e.repeat) jump();
+  } else if (k === 'ArrowDown' || k === 'KeyS'){
+    e.preventDefault();
+    if (resumeIfPaused()) return;
+    setDuck(true);
+  } else if (k === 'ShiftLeft' || k === 'ShiftRight'){
+    if (!e.repeat){
+      if (resumeIfPaused()) return;
+      setStop(!S.stopped);   // 开关式。不 preventDefault:Shift 还要配别的快捷键
+    }
+  } else if (k === 'KeyM'){
+    soundOn = !soundOn;
+    if (soundOn) sfx.point();
+  }
+}, { passive:false });
+
+window.addEventListener('keyup', e => {
+  const k = e.code;
+  if (k === 'Space' || k === 'ArrowUp' || k === 'KeyW' || k === 'Enter') endJump();
+  if (k === 'ArrowDown' || k === 'KeyS') setDuck(false);
+});
+
+// 画布分区:上半屏跳(按住跳更高),按住下半屏蹲。
+// 屏幕上只剩一个暂停键,所以手机的跳跃/下蹲仍然靠画布分区
+let pointerDuck = false;
+function pointerDown(e){
+  e.preventDefault();
+  audio();
+  if (resumeIfPaused()) return;   // 失焦暂停后,点一下画布就恢复
+  const rect = canvas.getBoundingClientRect();
+  const p = e.touches ? e.touches[0] : e;
+  const relY = (p.clientY - rect.top) / rect.height;
+  if (relY > 0.6 && S.phase === 'run'){ pointerDuck = true; setDuck(true); }
+  else jump();
+}
+function pointerUp(){
+  if (pointerDuck){ pointerDuck = false; setDuck(false); }
+  else endJump();
+}
+canvas.addEventListener('touchstart', pointerDown, { passive:false });
+canvas.addEventListener('touchend',   pointerUp,   { passive:false });
+canvas.addEventListener('touchcancel',pointerUp,   { passive:false });
+canvas.addEventListener('mousedown',  pointerDown);
+window.addEventListener('mouseup',    pointerUp);
+
+/* ══════════════════════════════════════════════════════════
+   屏幕按键:只剩一个「暂停」
+   图标是 8×8 像素网格,和 Clawd 同一套画法:纯方块,零曲线
+   ══════════════════════════════════════════════════════════ */
+const PAD_ICON = {
+  stop: ['........','.##..##.','.##..##.','.##..##.','.##..##.','.##..##.','.##..##.','........'],
+};
+
+function iconSVG(grid){
+  let rects = '';
+  for (let r = 0; r < grid.length; r++)
+    for (let c = 0; c < grid[r].length; c++)
+      if (grid[r][c] === '#')
+        rects += '<rect x="' + c + '" y="' + r + '" width="1" height="1"/>';
+  return '<svg viewBox="0 0 8 8" width="22" height="22" shape-rendering="crispEdges" ' +
+         'fill="currentColor" aria-hidden="true">' + rects + '</svg>';
+}
+
+// 开关式:按一下世界冻结,手就空出来了,再按一下继续
+const padStopEl = document.getElementById('bStop');
+padStopEl.querySelector('.pi').innerHTML = iconSVG(PAD_ICON.stop);
+padStopEl.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  audio();
+  if (resumeIfPaused()) return;   // 暂停中按它就是「继续」,而不是再切一次停住
+  setStop(!S.stopped);
+});
+let padStopLit = null;   // 只在状态变化时动 DOM,别每帧都写 classList
+
+window.addEventListener('blur', () => {
+  S.stopped = false;                     // 失焦收不到 keyup,别卡在停住状态
+  if (S.phase === 'run') S.phase = 'paused';
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && S.phase === 'run') S.phase = 'paused';
+});
+
+/* ══════════════════════════════════════════════════════════
+   碰撞
+   ══════════════════════════════════════════════════════════ */
+const crabBox = () => crab.ducking && crab.onGround
+  ? { x: CRAB_X - CRAB_DUCK_W/2 + 3, y: GROUND_Y - crab.y - CRAB_DUCK_H, w: CRAB_DUCK_W - 6, h: CRAB_DUCK_H }
+  : { x: CRAB_X - CRAB_W/2 + 3,      y: GROUND_Y - crab.y - CRAB_H,      w: CRAB_W - 6,      h: CRAB_H };
+
+const obsBox = o => o.kind === 'cactus'
+  ? { x: o.x + 2, y: GROUND_Y - o.h, w: o.w - 4, h: o.h }
+  : { x: o.x + 6, y: o.y + 3,        w: BIRD_W - 14, h: BIRD_H - 6 };
+
+function hit(a, b){
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+/* ══════════════════════════════════════════════════════════
+   生成障碍
+   ══════════════════════════════════════════════════════════ */
+function spawn(){
+  // 分数越高,鸟出现的概率越大
+  const birdChance = Math.min(0.34, Math.max(0, (S.speed - 430) / 1100));
+  if (Math.random() < birdChance){
+    const level = BIRD_LEVELS[Math.random() < 0.72 ? 0 : 1];
+    S.obstacles.push({
+      kind: 'bird',
+      x: W + 30,
+      y: GROUND_Y - level - BIRD_H,
+      seed: Math.random() * 10,
+    });
+  } else {
+    const big   = Math.random() < (S.speed > 520 ? 0.5 : 0.28);
+    const group = big ? (Math.random() < 0.3 ? 2 : 1)
+                      : (Math.random() < 0.45 ? (Math.random() < 0.4 ? 3 : 2) : 1);
+    S.obstacles.push(makeCactus(W + 20, big, group));
+  }
+
+  // 间距随速度自动放大,保证永远跳得过去
+  const minGap = S.speed * 0.58 + 70;
+  const maxGap = S.speed * 1.05 + 130;
+  S.spawnIn = minGap + Math.random() * (maxGap - minGap);
+}
+
+/* ══════════════════════════════════════════════════════════
+   更新
+   ══════════════════════════════════════════════════════════ */
+function update(dt){
+  if (S.phase === 'paused'){ S.time += dt; return; }
+
+  S.time += dt;
+
+  // 按住 Shift 停住:世界整体冻结(地面/障碍/云/粒子/计分全停),
+  // 但螃蟹自身的跳跃与下蹲物理照常走 —— 所以停下来也能蹲能跳
+  const scroll = (S.stopped && S.phase === 'run') ? 0 : 1;
+
+  /* 云 */
+  for (const c of S.clouds){
+    c.x -= (c.sp * S.speed * 0.5 + 6) * scroll * dt;
+    if (c.x < -60){ c.x = W + 40 + Math.random() * 140; c.y = 24 + Math.random() * 62; }
+  }
+
+  /* 地面碎石 */
+  for (const d of S.ground){
+    d.x -= S.speed * scroll * dt;
+    if (d.x < -12) d.x += W * 2;
+  }
+
+  /* 粒子 */
+  for (let i = S.particles.length - 1; i >= 0; i--){
+    const p = S.particles[i];
+    p.life -= dt;
+    if (p.life <= 0){ S.particles.splice(i, 1); continue; }
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vy += 520 * dt;
+    p.x -= S.speed * scroll * dt;
+  }
+
+  if (S.flash > 0) S.flash -= dt;
+  if (S.shake > 0) S.shake = Math.max(0, S.shake - dt * 26);
+
+  /* 昼夜过渡 */
+  const target = S.night ? 1 : 0;
+  S.nightMix += (target - S.nightMix) * Math.min(1, dt * 1.6);
+
+  if (S.phase === 'ready'){
+    S.runPhase += dt * 7;
+    S.legFrame = Math.floor(S.runPhase / 1.6);   // 标题界面腿也要动
+    return;
+  }
+
+  if (S.phase === 'over'){
+    // 死亡后继续掉落到地面
+    if (!crab.onGround){
+      crab.vy -= GRAVITY * dt;
+      crab.y += crab.vy * dt;
+      if (crab.y <= 0){ crab.y = 0; crab.vy = 0; crab.onGround = true; }
+    }
+    return;
+  }
+
+  /* ── 速度与分数 ─────────────────────────────────── */
+  S.speed = Math.min(SPEED_MAX, S.speed + SPEED_RAMP * S.speed * S.speed * dt * scroll);
+  S.score += dt * S.speed * 0.036 * scroll;
+
+  if (S.score >= S.nextMilestone){
+    S.nextMilestone += MILESTONE;
+    sfx.point();
+    S.flash = 0.16;
+    const band = Math.floor(S.score / NIGHT_EVERY);
+    S.night = band % 2 === 1;
+  }
+
+  S.runPhase += dt * (S.speed / 46) * scroll;
+  // 停住时定格在「四腿着地」的站立姿势,而不是半跨步
+  S.legFrame = S.stopped ? 0 : Math.floor(S.runPhase / 1.6);
+
+  /* ── 螃蟹物理 ───────────────────────────────────── */
+  if (!crab.onGround){
+    crab.vy -= (crab.ducking ? GRAVITY + FAST_FALL : GRAVITY) * dt;
+    crab.y += crab.vy * dt;
+    if (crab.y <= 0){
+      crab.y = 0; crab.vy = 0; crab.onGround = true;
+      sfx.land();
+      for (let i = 0; i < 5; i++) puff(CRAB_X - 4, GROUND_Y, Math.random() < 0.5 ? -1 : -0.4);
+    }
+  } else if (scroll && Math.random() < dt * 14){
+    puff(CRAB_X - 14, GROUND_Y, -1);
+  }
+
+  /* ── 障碍移动 / 碰撞 ────────────────────────────── */
+  const box = crabBox();
+  for (let i = S.obstacles.length - 1; i >= 0; i--){
+    const o = S.obstacles[i];
+    o.x -= S.speed * scroll * dt;
+
+    if (o.kind === 'bird' && scroll) o.y += Math.sin(S.time * 3 + o.seed) * 6 * dt;
+
+    if (o.x + (o.kind === 'cactus' ? o.w : BIRD_W) < -40){
+      S.obstacles.splice(i, 1);
+      continue;
+    }
+    if (hit(box, obsBox(o))){
+      crab.dead = true;
+      S.phase = 'over';
+      S.overAt = S.time;
+      S.shake = 1;
+      sfx.die();
+      S.hi = Math.max(S.hi, Math.floor(S.score));
+      try { localStorage.setItem('clawdRunHi', String(S.hi)); } catch(e){}
+      for (let k = 0; k < 16; k++) puff(CRAB_X, GROUND_Y - 20, Math.random() * 2 - 1);
+      return;
+    }
+  }
+
+  S.spawnIn -= S.speed * scroll * dt;
+  if (S.spawnIn <= 0) spawn();
+}
+
+/* ══════════════════════════════════════════════════════════
+   渲染
+   ══════════════════════════════════════════════════════════ */
+function drawSky(g, pal){
+  const nm = S.nightMix;
+
+  // 星芒(白天 = 太阳)
+  if (nm < 0.98){
+    g.save();
+    g.globalAlpha = (1 - nm) * 0.55;
+    drawSun(g, 688, 52, 20, ORANGE, S.time * 0.16);
+    g.restore();
+  }
+  // 星星
+  if (nm > 0.02){
+    g.fillStyle = '#F3EFE4';
+    for (const s of S.stars){
+      const tw = 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(S.time * 2.2 + s.ph));
+      g.globalAlpha = nm * tw;
+      g.beginPath(); g.arc(s.x, s.y, s.r, 0, Math.PI*2); g.fill();
+    }
+    g.globalAlpha = 1;
+  }
+  // 月亮
+  if (nm > 0.05){
+    g.save();
+    g.globalAlpha = nm * 0.9;
+    g.fillStyle = '#E8E4DA';
+    g.beginPath(); g.arc(690, 50, 15, 0, Math.PI*2); g.fill();
+    g.fillStyle = pal.bg;
+    g.beginPath(); g.arc(681, 45, 13, 0, Math.PI*2); g.fill();
+    g.restore();
+  }
+}
+
+function drawScore(g, pal){
+  const pad = 22;
+  g.textBaseline = 'top';
+  g.textAlign = 'right';
+  g.fillStyle = pal.fg;
+
+  g.font = '700 15px "Courier New",ui-monospace,monospace';
+  g.globalAlpha = 0.45;
+  g.fillText('HI ' + String(S.hi).padStart(5, '0'), W - pad - 92, pad);
+
+  g.globalAlpha = S.flash > 0 ? (0.55 + Math.abs(Math.sin(S.time * 40)) * 0.45) : 0.9;
+  g.fillText(String(Math.floor(S.score)).padStart(5, '0'), W - pad, pad);
+
+  // 状态指示
+  g.textAlign = 'left';
+  g.globalAlpha = 0.3;
+  g.font = '12px "Courier New",ui-monospace,monospace';
+  g.fillText((S.night ? '☾ ' : '') + (soundOn ? '♪ on' : '♪ off'), pad, pad + 2);
+
+  // 停住提示
+  if (S.stopped){
+    g.globalAlpha = 0.55 + Math.sin(S.time * 5) * 0.3;
+    g.fillStyle = ORANGE;
+    g.font = '700 13px "Courier New",ui-monospace,monospace';
+    g.fillText('■ 暂停中', pad, pad + 22);
+    g.fillStyle = pal.fg;
+  }
+
+  g.globalAlpha = 1;
+  g.textBaseline = 'alphabetic';
+}
+
+function drawOver(g, pal){
+  const cx = W / 2, cy = 74;
+
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillStyle = pal.fg;
+  g.font = '700 22px "Courier New",ui-monospace,monospace';
+  g.fillText('G A M E   O V E R', cx, cy);
+
+  g.globalAlpha = 0.5;
+  g.font = '13px "Courier New",ui-monospace,monospace';
+  g.fillText('得分 ' + Math.floor(S.score) + '   ·   最高 ' + S.hi, cx, cy + 28);
+  g.globalAlpha = 1;
+
+  // 重开按钮
+  const by = cy + 64;
+  g.save();
+  g.globalAlpha = 0.5 + Math.sin(S.time * 3.4) * 0.18;
+  g.strokeStyle = pal.fg;
+  g.lineWidth = 2.4;
+  g.lineCap = 'round';
+  g.beginPath();
+  g.arc(cx, by, 12, Math.PI * 0.42, Math.PI * 1.9);
+  g.stroke();
+  g.beginPath();
+  g.moveTo(cx + 11.5, by - 5.5);
+  g.lineTo(cx + 12.5, by + 4.5);
+  g.lineTo(cx + 2.5, by + 3.5);
+  g.stroke();
+  g.restore();
+
+  g.globalAlpha = 0.4;
+  g.font = '11px "Courier New",ui-monospace,monospace';
+  g.fillText('空格 / 点击屏幕 重新开始', cx, by + 32);
+  g.globalAlpha = 1;
+  g.textBaseline = 'alphabetic';
+}
+
+let pageNight = false;
+function render(){
+  const isNight = S.nightMix > 0.5;
+  const pal = palette(isNight);
+
+  // 页面外框跟随昼夜
+  if (isNight !== pageNight){
+    pageNight = isNight;
+    document.body.classList.toggle('night', isNight);
+  }
+
+  // 停住按钮的激活态
+  if (S.stopped !== padStopLit){
+    padStopLit = S.stopped;
+    padStopEl.classList.toggle('on', padStopLit);
+  }
+
+  // 背景色(昼夜平滑过渡)
+  const dayBg = [240, 238, 230], nightBg = [28, 27, 25];
+  const bg = dayBg.map((v, i) => Math.round(v + (nightBg[i] - v) * S.nightMix));
+  ctx.fillStyle = `rgb(${bg[0]},${bg[1]},${bg[2]})`;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  if (S.shake > 0){
+    ctx.translate((Math.random() - 0.5) * S.shake * 8, (Math.random() - 0.5) * S.shake * 8);
+  }
+
+  drawSky(ctx, pal);
+
+  for (const c of S.clouds) drawCloud(ctx, c, pal, S.nightMix);
+
+  // 地面线
+  ctx.strokeStyle = pal.fg;
+  ctx.globalAlpha = 0.75;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, GROUND_Y + 1.5);
+  ctx.lineTo(W, GROUND_Y + 1.5);
+  ctx.stroke();
+
+  // 碎石
+  ctx.globalAlpha = 0.32;
+  ctx.fillStyle = pal.fg;
+  for (const d of S.ground) ctx.fillRect(d.x, d.y, d.w, d.h);
+  ctx.globalAlpha = 1;
+
+  // 障碍
+  for (const o of S.obstacles){
+    if (o.kind === 'cactus') drawCactus(ctx, o, pal);
+    else drawBird(ctx, o, pal, S.time);
+  }
+
+  // 影子
+  const sh = Math.max(0.35, 1 - crab.y / 150);
+  ctx.save();
+  ctx.globalAlpha = 0.14 * sh;
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.ellipse(CRAB_X, GROUND_Y + 3, 22 * sh, 4 * sh, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+
+  // 粒子
+  ctx.save();
+  ctx.fillStyle = pal.fg;
+  for (const p of S.particles){
+    ctx.globalAlpha = Math.max(0, p.life / p.max) * 0.5;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+
+  // 螃蟹
+  drawClawd(ctx, CRAB_X, GROUND_Y - crab.y, {
+    ducking:  crab.ducking,
+    onGround: crab.onGround,
+    legFrame: S.legFrame,
+    dead:     crab.dead,
+  });
+
+  ctx.restore();
+
+  drawScore(ctx, pal);
+
+  if (S.phase === 'ready'){
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.fillStyle = pal.fg;
+    ctx.globalAlpha = 0.78;
+    ctx.font = '700 18px "Courier New",ui-monospace,monospace';
+    ctx.fillText('按 空格 开始奔跑', W/2, 96);
+    ctx.globalAlpha = 0.4;
+    ctx.font = '12px "Courier New",ui-monospace,monospace';
+    ctx.fillText('↓ 下蹲  ·  Shift 暂停  ·  M 静音', W/2, 124);
+    ctx.restore();
+  }
+
+  if (S.phase === 'paused'){
+    ctx.save();
+    ctx.fillStyle = pal.bg;
+    ctx.globalAlpha = 0.75;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = pal.fg;
+    ctx.font = '700 20px "Courier New",ui-monospace,monospace';
+    ctx.fillText('已暂停  ·  按空格或点屏幕继续', W/2, 102);
+    ctx.restore();
+  }
+
+  if (S.phase === 'over') drawOver(ctx, pal);
+}
+
+/* ══════════════════════════════════════════════════════════
+   主循环
+   ══════════════════════════════════════════════════════════ */
+let last = performance.now();
+
+function loop(now){
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.05) dt = 0.05;          // 标签页切回来别穿模
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+fitCanvas();
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
